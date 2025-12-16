@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: PixelPrompt - Serverless AI Asset Manager
+
+Parameters:
+  OpenAIApiKey:
+    Type: String
+    Description: OpenAI API Key
+    NoEcho: true
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 512
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PUT,OPTIONS'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'*'"
+      MaxAge: "'600'"
+
+Resources:
+  # S3 Bucket for image storage
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'pixelprompt-images-${AWS::AccountId}-${AWS::Region}'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - HEAD
+            AllowedOrigins:
+              - http://localhost:5173
+              - http://localhost:3000
+              - http://127.0.0.1:5173
+              - http://127.0.0.1:3000
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+
+  # DynamoDB Table
+  ImageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'pixelprompt-images-${AWS::Region}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+
+  # Lambda: Generate Upload URL
+  GenerateUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - ImageBucket
+      - ImageTable
+    Properties:
+      FunctionName: PixelPrompt-GenerateUploadUrl
+      Handler: handlers/generate-url.handler
+      CodeUri: .
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageBucket
+          TABLE_NAME: !Ref ImageTable
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref ImageBucket
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /get-upload-url
+            Method: POST
+
+  # Lambda: Process Image (triggered by S3)
+  ProcessImageFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - ImageBucket
+      - ImageTable
+    Properties:
+      FunctionName: PixelPrompt-ProcessImage
+      Handler: handlers/process-image.handler
+      CodeUri: .
+      Timeout: 30
+      MemorySize: 1024
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageBucket
+          TABLE_NAME: !Ref ImageTable
+          OPENAI_API_KEY: !Ref OpenAIApiKey
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ImageBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref ImageTable
+            # Events removed - will configure S3 trigger manually after deployment
+
+  # Lambda: Get Images
+  GetImagesFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - ImageBucket
+      - ImageTable
+    Properties:
+      FunctionName: PixelPrompt-GetImages
+      Handler: handlers/get-images.handler
+      CodeUri: .
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageBucket
+          TABLE_NAME: !Ref ImageTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ImageTable
+        - S3ReadPolicy:
+            BucketName: !Ref ImageBucket
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /get-images
+            Method: GET        
+
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'
+  BucketName:
+    Description: S3 Bucket name
+    Value: !Ref ImageBucket
+  TableName:
+    Description: DynamoDB Table name
+    Value: !Ref ImageTable
+
